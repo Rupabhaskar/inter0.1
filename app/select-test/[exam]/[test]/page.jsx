@@ -6,8 +6,6 @@ import Image from "next/image";
 import {
   collection,
   collectionGroup,
-  doc,
-  getDoc,
   getDocs,
   query,
   where,
@@ -55,6 +53,7 @@ function CloudinaryImage({ src, alt, type = "question", priority = false }) {
 
   return (
     <div className={`relative inline-block ${sizeClasses}`}>
+      {/* eslint-disable-next-line @next/next/no-img-element -- non-Cloudinary URLs (e.g. data/blob) */}
       <img
         src={src}
         alt={alt}
@@ -87,7 +86,7 @@ export default function ExamTestPage({ params }) {
   const [markedForReview, setMarkedForReview] = useState(new Set());
   const [visited, setVisited] = useState(new Set());
 
-  /* ================= LOAD TEST FROM SUPERADMIN TESTS ================= */
+  /* ================= LOAD TEST (cached API: shared cache for test+questions) ================= */
   useEffect(() => {
     const load = async () => {
       if (!testId) {
@@ -95,31 +94,34 @@ export default function ExamTestPage({ params }) {
         router.push("/select-test");
         return;
       }
-
-      const [testSnap, qSnap] = await Promise.all([
-        getDoc(doc(db, TESTS_COLLECTION, testId)),
-        getDocs(collection(db, TESTS_COLLECTION, testId, "questions")),
-      ]);
-
-      if (!testSnap.exists()) {
+      const user = auth.currentUser;
+      if (!user?.uid) {
         setLoading(false);
         router.push("/select-test");
         return;
       }
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch(
+          `/superadmin/api/questions?testId=${encodeURIComponent(testId)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!res.ok) {
+          setLoading(false);
+          router.push("/select-test");
+          return;
+        }
+        const data = await res.json();
+        const testData = data.test;
+        const questionsData = data.questions ?? [];
+        if (!testData || questionsData.length === 0) {
+          setLoading(false);
+          router.push("/select-test");
+          return;
+        }
+        setTest(testData);
+        setQuestions(questionsData);
 
-      const testData = testSnap.data();
-      const questionsData = qSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-      if (questionsData.length === 0) {
-        setLoading(false);
-        router.push("/select-test");
-        return;
-      }
-
-      setTest(testData);
-      setQuestions(questionsData);
-
-      if (questionsData.length > 0) {
         const firstQ = questionsData[0];
         const imagesToPreload = [];
         if (firstQ.imageUrl) imagesToPreload.push(firstQ.imageUrl);
@@ -135,8 +137,12 @@ export default function ExamTestPage({ params }) {
             img.src = optimized;
           }
         });
+      } catch (err) {
+        console.error("Load test error:", err);
+        setTest(null);
+        setQuestions([]);
+        router.push("/select-test");
       }
-
       setLoading(false);
     };
 
@@ -153,6 +159,7 @@ export default function ExamTestPage({ params }) {
   /* ================= AUTO SUBMIT ================= */
   useEffect(() => {
     if (started && timeLeft === 0 && !submitted) submitTest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- submitTest stable, run only on timeLeft/started/submitted
   }, [timeLeft, started, submitted]);
 
   /* ================= FULLSCREEN DETECT ================= */
@@ -422,6 +429,7 @@ export default function ExamTestPage({ params }) {
   useEffect(() => {
     if (selectedSubject && filteredQuestions.length > 0) setCurrent(0);
     else if (!selectedSubject) setCurrent(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset current when subject changes only
   }, [selectedSubject]);
 
   useEffect(() => {
@@ -433,6 +441,7 @@ export default function ExamTestPage({ params }) {
       const originalIndex = getOriginalIndex(current);
       setVisited((prev) => new Set([...prev, originalIndex]));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- track visited by current index only
   }, [current]);
 
   const navigateToSubject = (subject) => {

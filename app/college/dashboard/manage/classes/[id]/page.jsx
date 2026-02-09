@@ -122,6 +122,7 @@ export default function ManageClassPage() {
 
   useEffect(() => {
     fetchMembers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchMembers intentionally omitted to run only when classId changes
   }, [classId]);
 
   return (

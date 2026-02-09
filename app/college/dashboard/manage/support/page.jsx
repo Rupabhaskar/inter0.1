@@ -108,6 +108,7 @@ export default function SupportPage() {
 
   // Live listeners for each ticket's messages (replies show without refresh)
   const ticketIds = useMemo(() => myTickets.map((t) => t.id), [myTickets]);
+  const ticketIdsKey = ticketIds.join(",");
   useEffect(() => {
     if (ticketIds.length === 0) return;
     const unsubs = ticketIds.map((id) =>
@@ -123,7 +124,7 @@ export default function SupportPage() {
       )
     );
     return () => unsubs.forEach((u) => u());
-  }, [ticketIds.join(",")]);
+  }, [ticketIdsKey, ticketIds]);
 
   const loadMessagesForTickets = async (tickets) => {
     const map = {};

@@ -3,19 +3,8 @@
 import { useEffect, useState, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Image from "next/image";
-import {
-  collection,
-  collectionGroup,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  limit,
-  addDoc,
-} from "firebase/firestore";
+import { collection, addDoc } from "firebase/firestore";
 import { db, auth } from "@/lib/firebase";
-import { questionDb } from "@/lib/firebaseQuestionDb";
 import ProtectedRoute from "@/components/ProtectedRoute";
 
 /* ================= CLOUDINARY IMAGE COMPONENT (next/image optimized) ================= */
@@ -56,6 +45,7 @@ function CloudinaryImage({ src, alt, type = "question", priority = false }) {
 
   return (
     <div className={`relative inline-block ${sizeClasses}`}>
+      {/* eslint-disable-next-line @next/next/no-img-element -- non-Cloudinary URLs (e.g. data/blob) */}
       <img
         src={src}
         alt={alt}
@@ -89,99 +79,73 @@ export default function CollegeTestPage() {
   const [studentName, setStudentName] = useState(""); // From student doc (students/{collegeCode}/ids)
   const [studentClass, setStudentClass] = useState(""); // course/class from student doc
 
-  /* ================= LOAD TEST (from questionDb by student college code) ================= */
+  /* ================= LOAD TEST (cached API: 1 read per student + shared cache for test+questions) ================= */
   useEffect(() => {
     const load = async () => {
-      const uid = auth.currentUser?.uid;
-      if (!uid) {
+      const user = auth.currentUser;
+      if (!user?.uid) {
         setLoading(false);
         return;
       }
-      // Get student's college code: schema students/{collegeCode}/ids/{uid}
-      const idsGroup = collectionGroup(db, "ids");
-      const studentQ = query(idsGroup, where("uid", "==", uid), limit(1));
-      const studentSnap = await getDocs(studentQ);
-      if (studentSnap.empty) {
-        setLoading(false);
-        return;
-      }
-      const studentDoc = studentSnap.docs[0];
-      const studentData = studentDoc.data();
-      // College code e.g. "SCRRC" = questionDb collection; doc(testId) has duration, name, testType; subcollection "questions"
-      const collegeCode =
-        (studentData.college != null && String(studentData.college).trim() !== "")
-          ? String(studentData.college).trim()
-          : studentDoc.ref.parent.parent.id;
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch(
+          `/college/api/questions?testId=${encodeURIComponent(testId)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setTest(null);
+          setQuestions([]);
+          setLoading(false);
+          return;
+        }
+        const data = await res.json();
+        const { test: testData, questions: questionsData, collegeCode: code, studentName: name, studentClass: cls } = data;
 
-      // FETCH STRATEGY: All questions in one batch (recommended for typical test sizes).
-      // Alternatives: one-by-one (getDoc per question) for huge tests; paginated (limit/startAfter) for 100+ questions.
-      // questionDb: collection(collegeCode).doc(testId) → test; collection(collegeCode, testId, "questions") → questions
-      const [testSnap, qSnap] = await Promise.all([
-        getDoc(doc(questionDb, collegeCode, testId)),
-        getDocs(collection(questionDb, collegeCode, testId, "questions")),
-      ]);
+        setCollegeCode(code ?? null);
+        setStudentName(name ?? "");
+        setStudentClass(cls ?? "");
+        setTest(testData);
+        setQuestions(questionsData ?? []);
 
-      if (!testSnap.exists()) {
-        setTest(null);
-        setQuestions([]);
-        setLoading(false);
-        return;
-      }
-
-      const testData = testSnap.data();
-      const questionsData = qSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-      setCollegeCode(collegeCode);
-      setStudentName(studentData.name != null ? String(studentData.name).trim() : "");
-      setStudentClass(
-        (studentData.course != null && String(studentData.course).trim() !== "")
-          ? String(studentData.course).trim()
-          : (studentData.class != null ? String(studentData.class).trim() : "")
-      );
-      setTest(testData);
-      setQuestions(questionsData);
-
-      // Preload first question's images immediately
-      if (questionsData.length > 0) {
-        const firstQ = questionsData[0];
-        const imagesToPreload = [];
-        if (firstQ.imageUrl) imagesToPreload.push(firstQ.imageUrl);
-        if (firstQ.optionImages) {
-          firstQ.optionImages.forEach((img) => {
-            if (img) imagesToPreload.push(img);
+        const qList = questionsData ?? [];
+        if (qList.length > 0) {
+          const firstQ = qList[0];
+          const imagesToPreload = [];
+          if (firstQ.imageUrl) imagesToPreload.push(firstQ.imageUrl);
+          if (firstQ.optionImages) {
+            firstQ.optionImages.forEach((img) => {
+              if (img) imagesToPreload.push(img);
+            });
+          }
+          imagesToPreload.forEach((src) => {
+            if (src.includes("cloudinary.com")) {
+              const optimized = src.replace("/upload/", "/upload/f_auto,q_auto,w_800/");
+              const img = new window.Image();
+              img.src = optimized;
+            }
           });
         }
-        imagesToPreload.forEach((src) => {
-          if (src.includes("cloudinary.com")) {
-            const optimized = src.replace("/upload/", "/upload/f_auto,q_auto,w_800/");
-            const img = new window.Image();
-            img.src = optimized;
-          }
-        });
-      }
 
-      // Cache images to Google Sheets
-      // 1. If image not in sheet → store it
-      // 2. If question exists but option missing → store only option
-      const questionsWithImages = questionsData.filter(
-        (q) => q.imageUrl || (q.optionImages && q.optionImages.some((img) => img))
-      );
-      
-      if (questionsWithImages.length > 0) {
-        fetch("/college/api/image-cache", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ questions: questionsWithImages }),
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.success) {
-              console.log(`Cache: ${data.cacheHits} hits, ${data.stored} stored`);
-            }
+        const questionsWithImages = qList.filter(
+          (q) => q.imageUrl || (q.optionImages && q.optionImages.some((img) => img))
+        );
+        if (questionsWithImages.length > 0) {
+          fetch("/college/api/image-cache", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ questions: questionsWithImages }),
           })
-          .catch((err) => console.error("Image cache error:", err));
+            .then((r) => r.json())
+            .then((d) => { if (d.success) console.log(`Cache: ${d.cacheHits} hits, ${d.stored} stored`); })
+            .catch((err) => console.error("Image cache error:", err));
+        }
+      } catch (err) {
+        console.error("Load test error:", err);
+        setTest(null);
+        setQuestions([]);
       }
-
       setLoading(false);
     };
 
@@ -205,6 +169,7 @@ export default function CollegeTestPage() {
     if (started && timeLeft === 0 && !submitted) {
       submitTest();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- submitTest stable, run only on timeLeft/started/submitted
   }, [timeLeft, started, submitted]);
 
   /* ================= FULLSCREEN DETECT ================= */
@@ -493,6 +458,7 @@ export default function CollegeTestPage() {
     } else if (!selectedSubject) {
       setCurrent(0);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset current when subject changes only
   }, [selectedSubject]);
 
   // Track visited questions
